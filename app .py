@@ -15,7 +15,12 @@ with st.sidebar:
     st.markdown("Adjust parameters to find the optimal architecture.")
     
     st.header("1. Location & Load")
-    api_key = st.text_input("NREL API Key", type="password")
+    # Check if key is in the secure vault; if not, show the input box
+    if "NREL_API_KEY" in st.secrets:
+        api_key = st.secrets["NREL_API_KEY"]
+        st.success("✅ NREL API Key securely loaded.")
+    else:
+        api_key = st.text_input("NREL API Key", type="password")
     lat = st.number_input("Latitude", value=42.36)
     lon = st.number_input("Longitude", value=-71.05)
     load_mw = st.number_input("Firm Load target (MW)", value=10.0, step=1.0)
