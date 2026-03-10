@@ -127,11 +127,14 @@ with col_out:
                 st.error("Invalid API Key or Location.")
                 st.stop()
                 
-            # Expanded grid to check 0 to 150 hours of storage (16 increments)
-            s_grid = np.linspace(load_mw * 0.5, load_mw * 6, 8) 
-            w_grid = np.linspace(load_mw * 0.5, load_mw * 6, 8)
+# --- EXPANDED EXTREME SEARCH GRID ---
+            # Tests VRE overbuild up to 12x the load (Massive overbuild)
+            s_grid = np.linspace(load_mw, load_mw * 12, 8) 
+            w_grid = np.linspace(load_mw, load_mw * 12, 8)
             st_pwr_grid = [load_mw] 
-            st_cap_grid = np.linspace(0, load_mw * 150, 16) 
+            
+            # Tests storage duration up to 350 hours (over 14 days of backup)
+            st_cap_grid = np.linspace(0, load_mw * 350, 15)
             
             best_ppa = float('inf')
             best_system = None
