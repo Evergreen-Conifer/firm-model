@@ -8,7 +8,7 @@ import requests
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Firm Power Optimizer", layout="wide")
 st.title("24/7 Clean Firm Power Optimizer")
-st.markdown("Optimizes the trade-off between VRE overbuild (CAPEX) and Biomethanol/Fuel usage (OPEX) to find the lowest PPA.")
+st.markdown("Optimizes the trade-off between VRE overbuild (CAPEX) and LDES / Fuel usage (OPEX) to find the lowest PPA.")
 
 # --- LAYOUT: Left (Outputs), Right (Inputs) ---
 col_out, col_in = st.columns([3, 1])
@@ -24,15 +24,15 @@ with col_in:
     target_reliability = st.slider("Target Reliability (%)", 80.0, 100.0, 100.0) / 100.0
     
     st.subheader("2. Firming & Storage")
-    rte = st.slider("Storage Round Trip Efficiency (%)", 40, 95, 70) / 100.0
+    # Low RTE mathematically forces larger solar/wind buildouts in the simulation
+    rte = st.slider("Storage Round Trip Efficiency (%)", 30, 95, 45) / 100.0
     
-    fuel_type = st.selectbox("Firming Fuel Type", ["Biomethanol (Advanced LDES/RSOFC)", "Custom Green Fuel", "No Fuel (Battery Only)"])
+    fuel_type = st.selectbox("Firming Fuel Type", ["No Fuel (Battery Only)", "Biomethanol (Advanced LDES/RSOFC)", "Custom Green Fuel"])
     
     if fuel_type == "Biomethanol (Advanced LDES/RSOFC)":
         use_fuel = True
         fuel_cost_tonne = st.number_input("Biomethanol Cost ($/tonne)", value=600.0, step=50.0)
-        fuel_mwh_per_tonne = 5.53 # Standard LHV for Methanol
-        st.caption("Energy Density: 5.53 MWh/tonne")
+        fuel_mwh_per_tonne = 5.53
     elif fuel_type == "Custom Green Fuel":
         use_fuel = True
         fuel_cost_tonne = st.number_input("Fuel Cost ($/tonne)", value=500.0)
@@ -45,8 +45,11 @@ with col_in:
     st.subheader("3. CAPEX ($/kW or $/kWh)")
     solar_capex_kw = st.number_input("Solar CAPEX ($/kW)", value=1000)
     wind_capex_kw = st.number_input("Wind CAPEX ($/kW)", value=1400)
-    st_capex_kw = st.number_input("Storage Power CAPEX ($/kW)", value=300)
-    st_capex_kwh = st.number_input("Storage Capacity CAPEX ($/kWh)", value=25)
+    
+    # Decoupled LDES Pricing: $2000/kW + $10/kWh = $3000/kW at 100 hours ($30/kWh)
+    st.markdown("**Storage Cost Structure**")
+    st_capex_kw = st.number_input("Power Block CAPEX ($/kW)", value=2000, help="Cost of inverters, fuel cells, BOP.")
+    st_capex_kwh = st.number_input("Energy Block CAPEX ($/kWh)", value=10, help="Marginal cost of additional hours (tanks, media).")
     
     st.subheader("4. OPEX ($/kW-year)")
     solar_opex_kw = st.number_input("Solar O&M", value=15)
@@ -91,6 +94,7 @@ def simulate_dispatch(s_mw, w_mw, st_mw, st_mwh, solar_1mw, wind_1mw, load_mw, r
         net_load = load[i] - total_gen[i]
         
         if net_load < 0: 
+            # RTE is applied here: Requires 1/RTE MWh from solar/wind to store 1 MWh in battery
             charge = min(-net_load, st_mw, (st_mwh - current_soc) / rte)
             current_soc += charge * rte
         elif net_load > 0: 
@@ -117,17 +121,17 @@ with col_out:
             st.error("Please enter an NREL API Key to fetch weather data.")
             st.stop()
             
-        with st.spinner("Simulating systems to optimize Solar/Wind vs. Biomethanol trade-off..."):
+        with st.spinner("Simulating systems across all durations (up to 150 hours) to find optimal PPA..."):
             solar_1mw, wind_1mw = get_weather_profiles(api_key, lat, lon)
             if solar_1mw is None:
                 st.error("Invalid API Key or Location.")
                 st.stop()
                 
-            # Expanded search grid to find the exact CAPEX vs OPEX tipping point
-            s_grid = np.linspace(load_mw * 0.5, load_mw * 5, 8) 
-            w_grid = np.linspace(load_mw * 0.5, load_mw * 5, 8)
+            # Expanded grid to check 0 to 150 hours of storage (16 increments)
+            s_grid = np.linspace(load_mw * 0.5, load_mw * 6, 8) 
+            w_grid = np.linspace(load_mw * 0.5, load_mw * 6, 8)
             st_pwr_grid = [load_mw] 
-            st_cap_grid = np.linspace(0, load_mw * 48, 5) 
+            st_cap_grid = np.linspace(0, load_mw * 150, 16) 
             
             best_ppa = float('inf')
             best_system = None
@@ -158,7 +162,7 @@ with col_out:
                                     }
 
             if best_system is None:
-                st.error("Could not reach target reliability. Try lowering the target or allowing fuel.")
+                st.error("Could not reach target reliability. Try lowering the target or expanding boundaries.")
                 st.stop()
                 
             rel, fuel_mwh, soc, total_gen, unmet, fuel_arr = simulate_dispatch(
@@ -167,7 +171,7 @@ with col_out:
             )
             
             # --- OUTPUT METRICS ---
-            st.success("Optimization Complete! Found the lowest-cost balance of CAPEX and OPEX.")
+            st.success("Optimization Complete! Found the lowest PPA across all durations.")
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Optimized PPA", f"${best_system['ppa']:.2f} / MWh")
@@ -204,7 +208,7 @@ with col_out:
                 ax.fill_between(range(168), 0, soc[0:168] / best_system['st_mwh'] * load_mw, 
                                 label="Storage SOC (%)", color='blue', alpha=0.3)
             if use_fuel:
-                ax.bar(range(168), fuel_arr[0:168], label="Biomethanol/Fuel Dispatched", color='red', alpha=0.6)
+                ax.bar(range(168), fuel_arr[0:168], label="Firming Fuel Dispatched", color='red', alpha=0.6)
             
             ax.set_ylabel("Megawatts (MW)")
             ax.set_xlabel("Hours")
