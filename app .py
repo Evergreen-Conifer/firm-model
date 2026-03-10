@@ -112,4 +112,4 @@ net_capex = gross_capex * (1 - itc_percent)
 
 annual_fuel_cost = np.sum(fuel_used_mwh) * green_fuel_cost
 annual_energy_delivered = load_mw * 8760 - np.sum(grid_shortfall)
-reliability = annual_energy_
+reliability = annual_energy_delivered / (load_mw * 8760)
