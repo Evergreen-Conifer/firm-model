@@ -15,21 +15,23 @@ with st.sidebar:
     st.markdown("Adjust parameters to find the optimal architecture.")
     
     st.header("1. Location & Load")
-    # Check if key is in the secure vault; if not, show the input box
     if "NREL_API_KEY" in st.secrets:
         api_key = st.secrets["NREL_API_KEY"]
         st.success("✅ NREL API Key securely loaded.")
     else:
         api_key = st.text_input("NREL API Key", type="password")
-    lat = st.number_input("Latitude", value=42.36)
-    lon = st.number_input("Longitude", value=-71.05)
-    load_mw = st.number_input("Firm Load target (MW)", value=10.0, step=1.0)
+        
+    state = st.text_input("State (Abbrev)", value="MN")
+    iso = st.selectbox("Energy ISO", ["MISO", "PJM", "ERCOT", "CAISO", "SPP", "NYISO", "ISO-NE", "Other"])
+    lat = st.number_input("Latitude", value=44.2008)
+    lon = st.number_input("Longitude", value=-92.6469)
+    load_mw = st.number_input("Firm Load target (MW)", value=300.0, step=10.0)
     target_reliability = st.slider("Target Reliability (%)", 80.0, 100.0, 100.0) / 100.0
     
     st.header("2. Firming & Storage")
-    rte = st.slider("Storage Round Trip Efficiency (%)", 30, 95, 45) / 100.0
+    rte = st.slider("Storage Round Trip Efficiency (%)", 30, 95, 40) / 100.0
     
-    fuel_type = st.selectbox("Firming Fuel Type", ["Biomethanol (Advanced LDES/RSOFC)", "Custom Green Fuel", "No Fuel (Battery Only)"])
+    fuel_type = st.selectbox("Firming Fuel Type", ["No Fuel (Battery Only)", "Biomethanol (Advanced LDES/RSOFC)", "Custom Green Fuel"])
     
     if fuel_type == "Biomethanol (Advanced LDES/RSOFC)":
         use_fuel = True
@@ -50,7 +52,7 @@ with st.sidebar:
     
     st.markdown("**Storage Cost Structure**")
     st_capex_kw = st.number_input("Power Block CAPEX ($/kW)", value=2000)
-    st_capex_kwh = st.number_input("Energy Block CAPEX ($/kWh)", value=10)
+    st_capex_kwh = st.number_input("Energy Block CAPEX ($/kWh)", value=20)
     
     st.header("4. OPEX & Financials")
     solar_opex_kw = st.number_input("Solar O&M ($/kW-yr)", value=15)
@@ -152,7 +154,6 @@ if run_opt:
                             annual_opex = (s * 1000 * solar_opex_kw) + (w * 1000 * wind_opex_kw) + (st_p * 1000 * st_opex_kw)
                             annual_fuel_cost = (fuel_mwh / fuel_mwh_per_tonne) * fuel_cost_tonne if use_fuel else 0
                             
-                            # Calculate PPAs
                             rev_req_gross = -npf.pmt(target_irr, 20, capex_gross) + annual_opex + annual_fuel_cost
                             ppa_gross = rev_req_gross / (total_load_annual * rel)
                             
@@ -177,6 +178,38 @@ if run_opt:
             best_system['st_mwh'], solar_1mw, wind_1mw, load_mw, rte, use_fuel
         )
         
+        # --- SCENARIO SUMMARY TABLE (EXCEL EXPORT) ---
+        st.success("Optimization Complete! Copy the table below to your scenario tracker.")
+        
+        duration_hrs = best_system['st_mwh'] / best_system['st_mw'] if best_system['st_mw'] > 0 else 0
+        fuel_tonnes = best_system['fuel_mwh'] / fuel_mwh_per_tonne if use_fuel else 0
+        
+        # Build the single-row dictionary
+        summary_data = {
+            "ISO": iso,
+            "State": state,
+            "Firm Load (MW)": load_mw,
+            "Fuel Used?": "Yes" if use_fuel else "No",
+            "Storage RTE": f"{rte*100:.0f}%",
+            "Target Rel.": f"{target_reliability*100:.1f}%",
+            "Achieved Rel.": f"{best_system['rel']*100:.2f}%",
+            "PPA w/ ITC ($/MWh)": round(best_system['ppa_net'], 2),
+            "PPA Gross ($/MWh)": round(best_system['ppa_gross'], 2),
+            "Net CAPEX ($M)": round(best_system['capex_net'] / 1e6, 1),
+            "Solar (MW)": round(best_system['s_mw'], 1),
+            "Wind (MW)": round(best_system['w_mw'], 1),
+            "Storage (MW)": round(best_system['st_mw'], 1),
+            "Storage (MWh)": round(best_system['st_mwh'], 1),
+            "Duration (hrs)": round(duration_hrs, 1),
+            "Fuel (tonnes/yr)": round(fuel_tonnes, 0)
+        }
+        
+        # Convert to DataFrame and display
+        df_summary = pd.DataFrame([summary_data])
+        st.dataframe(df_summary, hide_index=True)
+        
+        st.divider()
+
         # --- FINANCIAL METRICS ---
         st.subheader("Financial Performance")
         c1, c2, c3, c4 = st.columns(4)
@@ -192,15 +225,12 @@ if run_opt:
         phys1, phys2, phys3, phys4 = st.columns(4)
         phys1.metric("Solar Required", f"{best_system['s_mw']:.1f} MW", f"~{best_system['s_mw']*6:.0f} acres", delta_color="off")
         phys2.metric("Wind Required", f"{best_system['w_mw']:.1f} MW", f"~{best_system['w_mw']*60:.0f} acres", delta_color="off")
-        duration = best_system['st_mwh'] / best_system['st_mw'] if best_system['st_mw'] > 0 else 0
-        phys3.metric("Storage Required", f"{best_system['st_mw']:.1f} MW", f"{duration:.0f} hours ({best_system['st_mwh']:.0f} MWh)", delta_color="off")
-        
-        tonnes = best_system['fuel_mwh']/fuel_mwh_per_tonne if use_fuel else 0
-        phys4.metric("Fuel Needed", f"{tonnes:,.0f} tonnes/yr" if use_fuel else "N/A", f"${best_system['annual_fuel_cost']/1e6:.2f}M / yr OPEX" if use_fuel else "", delta_color="off")
+        phys3.metric("Storage Required", f"{best_system['st_mw']:.1f} MW", f"{duration_hrs:.0f} hours ({best_system['st_mwh']:.0f} MWh)", delta_color="off")
+        phys4.metric("Fuel Needed", f"{fuel_tonnes:,.0f} tonnes/yr" if use_fuel else "N/A", f"${best_system['annual_fuel_cost']/1e6:.2f}M / yr OPEX" if use_fuel else "", delta_color="off")
         
         st.divider()
 
-# --- DATE TRACKING & DROUGHTS ---
+        # --- DATE TRACKING & DROUGHTS ---
         date_rng = pd.date_range(start='2025-01-01', periods=8760, freq='h')
         
         df_dispatch = pd.DataFrame({
@@ -210,12 +240,11 @@ if run_opt:
             'Unmet_MWh': unmet
         })
         
-        if use_fuel and tonnes > 0:
+        if use_fuel and fuel_tonnes > 0:
             st.subheader("⚠️ Top 5 Energy Droughts (Fuel Usage)")
             df_daily_fuel = df_dispatch.groupby(df_dispatch['Date'].dt.date)['Fuel_MWh'].sum().reset_index()
             top_droughts = df_daily_fuel[df_daily_fuel['Fuel_MWh'] > 0].sort_values(by='Fuel_MWh', ascending=False).head(5)
             
-            # Format the dataframe for display
             top_droughts.columns = ['Date', 'Fuel Burned (MWh)']
             top_droughts['Est. Tonnes Used'] = top_droughts['Fuel Burned (MWh)'] / fuel_mwh_per_tonne
             st.dataframe(top_droughts.style.format({'Fuel Burned (MWh)': '{:.1f}', 'Est. Tonnes Used': '{:.1f}'}), use_container_width=True)
@@ -232,7 +261,6 @@ if run_opt:
         
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
         
-        # Plot 1: State of Charge
         soc_percent = (soc / best_system['st_mwh'] * 100) if best_system['st_mwh'] > 0 else np.zeros(8760)
         ax1.plot(date_rng, soc_percent, color='blue', linewidth=0.5)
         ax1.fill_between(date_rng, 0, soc_percent, color='blue', alpha=0.2)
@@ -240,7 +268,6 @@ if run_opt:
         ax1.set_title("Storage Inventory Throughout the Year")
         ax1.grid(True, alpha=0.3)
         
-        # Plot 2: Fuel Dispatch
         if use_fuel:
             ax2.bar(date_rng, fuel_arr, color='red', width=0.05)
             ax2.set_ylabel("Fuel Burned (MWh/hr)")
@@ -251,8 +278,6 @@ if run_opt:
             ax2.set_title("Unmet Load Events (No Fuel)")
             
         ax2.grid(True, alpha=0.3)
-        
-        # Format X-axis for months
         ax2.xaxis.set_major_locator(mdates.MonthLocator())
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
         plt.xticks(rotation=45)
