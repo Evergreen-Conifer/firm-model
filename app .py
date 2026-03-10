@@ -195,9 +195,9 @@ if run_opt:
         
         st.divider()
 
-        # --- DATE TRACKING & DROUGHTS ---
-        # Map 8760 to dates (using standard non-leap year)
-       date_rng = pd.date_range(start='2025-01-01', periods=8760, freq='h')
+# --- DATE TRACKING & DROUGHTS ---
+        date_rng = pd.date_range(start='2025-01-01', periods=8760, freq='h')
+        
         df_dispatch = pd.DataFrame({
             'Date': date_rng,
             'SOC_MWh': soc,
