@@ -32,12 +32,14 @@ with st.sidebar:
     rte = st.slider("Storage RTE (%)", 30, 95, 60) / 100.0
     
     fuel_type = st.selectbox("Firming Fuel", ["No Fuel (Battery Only)", "Biomethanol (LDES/RSOFC)", "Custom Green Fuel"])
-    if "Fuel" in fuel_type and "No Fuel" not in fuel_type:
+    use_fuel = False
+    fuel_cost_tonne = 0
+    fuel_density = 1.0
+    
+    if "No Fuel" not in fuel_type:
         use_fuel = True
         fuel_cost_tonne = st.number_input("Fuel Cost ($/tonne)", value=600.0)
         fuel_density = 5.53 if "Biomethanol" in fuel_type else st.number_input("MWh/tonne", value=15.0)
-    else:
-        use_fuel, fuel_cost_tonne, fuel_density = False, 0, 1
     
     st.header("3. Financial Engineering")
     use_leverage = st.toggle("Apply Project Finance (Leverage)", value=True)
@@ -75,26 +77,25 @@ def get_weather(api_key, lat, lon):
     win = np.clip(0.35 + (np.cos((h%24-2)*np.pi/12)*-0.15) + (np.cos((h-4380)*np.pi/4380)*0.2) + np.random.normal(0,0.1,8760), 0, 1)
     return sol, win
 
-def simulate_with_wrap(s_mw, w_mw, st_p_mw, st_e_mwh, sol_1, win_1, load_mw, rte, use_fuel):
+def simulate_with_wrap(s_mw, w_mw, st_p_mw, st_e_mwh, sol_1, win_1, load_mw, rte, use_fuel_option):
     gen = (s_mw * sol_1) + (w_mw * win_1)
     def run_year(start_soc):
         soc, fuel_mwh, unmet = np.zeros(8760), np.zeros(8760), np.zeros(8760)
         cur = start_soc
         for i in range(8760):
             net = load_mw - gen[i]
-            if net < 0: # Charging
+            if net < 0: # Charge
                 chg = min(-net, st_p_mw, (st_e_mwh - cur)/rte)
                 cur += chg * rte
-            else: # Discharging
+            else: # Discharge
                 dis = min(net, st_p_mw, cur)
                 cur -= dis
                 short = net - dis
                 if short > 0:
-                    if use_fuel: fuel_mwh[i] = short
+                    if use_fuel_option: fuel_mwh[i] = short
                     else: unmet[i] = short
             soc[i] = cur
         return soc, fuel_mwh, unmet, cur
-    # Double Pass
     _, _, _, end_soc = run_year(st_e_mwh * 0.5)
     return run_year(end_soc)
 
@@ -104,7 +105,7 @@ if run_opt:
         s1, w1 = get_weather(api_key, lat, lon)
         s_grid = [0] if config_mode == "Wind Only" else np.linspace(load_mw, load_mw*10, 8)
         w_grid = [0] if config_mode == "Solar Only" else np.linspace(load_mw, load_mw*10, 8)
-        st_grid = np.linspace(load_mw*50, load_mw*450, 10)
+        st_grid = np.linspace(load_mw*10, load_mw*450, 12)
 
         best = {'ppa_net': float('inf')}
         for s in s_grid:
@@ -112,32 +113,33 @@ if run_opt:
                 for c in st_grid:
                     soc, fuel, unm, _ = simulate_with_wrap(s, w, load_mw, c, s1, w1, load_mw, rte, use_fuel)
                     achieved_rel = 1 - (np.sum(unm)/(load_mw*8760))
+                    
                     if achieved_rel >= target_rel:
                         capex_gross = (s*1000*solar_capex) + (w*1000*wind_capex) + (load_mw*1000*st_p_capex) + (c*1000*st_e_capex)
-                        ann_fuel_tonnes = np.sum(fuel)/fuel_density
-                        ann_fuel_cost = ann_fuel_tonnes * fuel_cost_tonne
+                        ann_fuel_t = np.sum(fuel)/fuel_density
+                        ann_fuel_cost = ann_fuel_t * fuel_cost_tonne
                         ann_om = (s*1000*s_om) + (w*1000*w_om) + (load_mw*1000*st_om)
                         
-                        # PPA Gross (Unlevered, No ITC)
+                        # Calculate PPAs
                         rev_gross = -npf.pmt(0.10, 20, capex_gross) + ann_om + ann_fuel_cost
-                        ppa_gross = rev_gross / (load_mw * achieved_rel * 8760)
+                        ppa_gross = rev_gross / (load_mw * 8760)
                         
-                        # PPA Net (WACC + ITC)
                         rev_net = -npf.pmt(wacc, 20, capex_gross*(1-itc_percent)) + ann_om + ann_fuel_cost
-                        ppa_net = rev_net / (load_mw * achieved_rel * 8760)
+                        ppa_net = rev_net / (load_mw * 8760)
                         
                         if ppa_net < best['ppa_net']:
-                            best = {'ppa_net': ppa_net, 'ppa_gross': ppa_gross, 's':s, 'w':w, 'c':c, 'rel':achieved_rel, 'soc':soc, 'fuel':fuel, 'capex_gross':capex_gross, 'fuel_tonnes':ann_fuel_tonnes}
+                            best = {'ppa_net': ppa_net, 'ppa_gross': ppa_gross, 's':s, 'w':w, 'c':c, 'rel':achieved_rel, 
+                                    'soc':soc, 'fuel':fuel, 'capex_gross':capex_gross, 'fuel_tonnes':ann_fuel_t, 'ann_fuel_cost': ann_fuel_cost}
 
         if best['ppa_net'] == float('inf'):
             st.error("No valid system found.")
         else:
             st.success("Optimization Complete!")
-            # 1. THE BIG SUMMARY TABLE (EXCEL FORMAT)
+            # 1. THE BIG SUMMARY TABLE
             summary_row = {
                 "ISO": iso_input, "State": state_input, "Firm Load": f"{load_mw}MW",
                 "Fuel Used": "Yes" if use_fuel else "No", "Storage RTE": f"{rte*100:.0f}%",
-                "Target Rel.": f"{target_rel*100:.1f}%", "Achieved Rel.": f"{best['rel']*100:.2f}%",
+                "Target Rel.": f"{target_rel*100:.1f}%", "Reliability Achieved": f"{best['rel']*100:.2f}%",
                 "PPA w/ ITC $/MWh": round(best['ppa_net'], 2), "PPA Gross $/MWh": round(best['ppa_gross'], 2),
                 "Net Capex ($M)": round((best['capex_gross']*(1-itc_percent))/1e6, 1), "Net Solar (MW)": round(best['s'], 1),
                 "Wind (MW)": round(best['w'], 1), "Storage (MW)": load_mw, "MWh": round(best['c'], 1),
@@ -151,7 +153,7 @@ if run_opt:
             c1.metric("PPA (Net w/ ITC)", f"${best['ppa_net']:.2f}")
             c2.metric("PPA (Gross)", f"${best['ppa_gross']:.2f}")
             c3.metric("Storage MWh", f"{best['c']:,.0f}")
-            c4.metric("Annual Fuel (t)", f"{best['fuel_tonnes']:,.0f}")
+            c4.metric("Annual Fuel Cost", f"${best['ann_fuel_cost']/1e6:.2f}M")
 
             st.divider()
             # 3. VISUALS
@@ -162,6 +164,7 @@ if run_opt:
             
             if use_fuel:
                 ax2.fill_between(dates, best['fuel'], color='red', alpha=0.5); ax2.set_ylabel("Fuel Dispatch (MW)")
+                ax2.set_title("Annual Fuel Burn (Hourly MW)")
             else:
                 ax2.set_ylabel("No Fuel Enabled")
             st.pyplot(fig)
