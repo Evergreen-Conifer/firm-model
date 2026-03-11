@@ -90,27 +90,36 @@ def simulate_dispatch(s_mw, w_mw, st_mw, st_mwh, solar_1mw, wind_1mw, load_mw, r
     total_gen = solar_gen + wind_gen
     load = np.full(8760, load_mw)
     
-    soc = np.zeros(8760)
-    fuel_used_mwh = np.zeros(8760)
-    unmet_load = np.zeros(8760)
-    current_soc = st_mwh * 0.5  # Starts the year at 50% capacity
-    
-    for i in range(8760):
-        net_load = load[i] - total_gen[i]
-        if net_load < 0: 
-            charge = min(-net_load, st_mw, (st_mwh - current_soc) / rte)
-            current_soc += charge * rte
-        elif net_load > 0: 
-            discharge = min(net_load, st_mw, current_soc)
-            current_soc -= discharge
-            shortfall = net_load - discharge
-            if shortfall > 0:
-                if use_fuel:
-                    fuel_used_mwh[i] = shortfall
-                else:
-                    unmet_load[i] = shortfall
-        soc[i] = current_soc
+    # Nested function to run the 8760 array so we can do it twice (Wrap-Around Method)
+    def run_year(start_soc):
+        soc = np.zeros(8760)
+        fuel_used_mwh = np.zeros(8760)
+        unmet_load = np.zeros(8760)
+        current_soc = start_soc
         
+        for i in range(8760):
+            net_load = load[i] - total_gen[i]
+            if net_load < 0: 
+                charge = min(-net_load, st_mw, (st_mwh - current_soc) / rte)
+                current_soc += charge * rte
+            elif net_load > 0: 
+                discharge = min(net_load, st_mw, current_soc)
+                current_soc -= discharge
+                shortfall = net_load - discharge
+                if shortfall > 0:
+                    if use_fuel:
+                        fuel_used_mwh[i] = shortfall
+                    else:
+                        unmet_load[i] = shortfall
+            soc[i] = current_soc
+        return soc, fuel_used_mwh, unmet_load, current_soc
+
+    # Pass 1: Burn-in to find the natural December 31st equilibrium SOC
+    _, _, _, natural_end_soc = run_year(st_mwh * 0.5)
+    
+    # Pass 2: The actual recorded simulation using the natural starting point
+    soc, fuel_used_mwh, unmet_load, _ = run_year(natural_end_soc)
+    
     energy_delivered = (load_mw * 8760) - np.sum(unmet_load)
     reliability = energy_delivered / (load_mw * 8760)
     
@@ -124,13 +133,12 @@ if run_opt:
         st.error("Please enter an NREL API Key in the sidebar.")
         st.stop()
         
-    with st.spinner("Simulating extreme boundaries to find optimal CAPEX/OPEX balance..."):
+    with st.spinner("Running Wrap-Around pass to find optimal CAPEX/OPEX balance..."):
         solar_1mw, wind_1mw = get_weather_profiles(api_key, lat, lon)
         if solar_1mw is None:
             st.error("Invalid API Key or Location.")
             st.stop()
             
-        # Extreme grid search constraints
         s_grid = np.linspace(load_mw, load_mw * 12, 8) 
         w_grid = np.linspace(load_mw, load_mw * 12, 8)
         st_pwr_grid = [load_mw] 
@@ -184,7 +192,6 @@ if run_opt:
         duration_hrs = best_system['st_mwh'] / best_system['st_mw'] if best_system['st_mw'] > 0 else 0
         fuel_tonnes = best_system['fuel_mwh'] / fuel_mwh_per_tonne if use_fuel else 0
         
-        # Build the single-row dictionary
         summary_data = {
             "ISO": iso,
             "State": state,
@@ -204,7 +211,6 @@ if run_opt:
             "Fuel (tonnes/yr)": round(fuel_tonnes, 0)
         }
         
-        # Convert to DataFrame and display
         df_summary = pd.DataFrame([summary_data])
         st.dataframe(df_summary, hide_index=True)
         
