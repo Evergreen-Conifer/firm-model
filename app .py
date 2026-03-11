@@ -93,7 +93,7 @@ def simulate_dispatch(s_mw, w_mw, st_mw, st_mwh, solar_1mw, wind_1mw, load_mw, r
     soc = np.zeros(8760)
     fuel_used_mwh = np.zeros(8760)
     unmet_load = np.zeros(8760)
-    current_soc = 0.0
+    current_soc = st_mwh * 0.5  # Starts the year at 50% capacity
     
     for i in range(8760):
         net_load = load[i] - total_gen[i]
