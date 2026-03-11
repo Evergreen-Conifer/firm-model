@@ -12,284 +12,113 @@ st.set_page_config(page_title="Firm Power Optimizer", layout="wide", initial_sid
 # --- SIDEBAR (INPUTS) ---
 with st.sidebar:
     st.title("⚙️ System Inputs")
-    st.markdown("Adjust parameters to find the optimal architecture.")
     
-    st.header("1. Location & Load")
     if "NREL_API_KEY" in st.secrets:
         api_key = st.secrets["NREL_API_KEY"]
-        st.success("✅ NREL API Key securely loaded.")
+        st.success("✅ NREL API Key loaded.")
     else:
         api_key = st.text_input("NREL API Key", type="password")
         
-    state = st.text_input("State (Abbrev)", value="MN")
-    iso = st.selectbox("Energy ISO", ["MISO", "PJM", "ERCOT", "CAISO", "SPP", "NYISO", "ISO-NE", "Other"])
-    lat = st.number_input("Latitude", value=44.2008)
-    lon = st.number_input("Longitude", value=-92.6469)
-    load_mw = st.number_input("Firm Load target (MW)", value=300.0, step=10.0)
-    target_reliability = st.slider("Target Reliability (%)", 80.0, 100.0, 100.0) / 100.0
+    st.header("1. Project Details")
+    state = st.text_input("State", value="TX")
+    iso = st.selectbox("ISO", ["ERCOT", "MISO", "PJM", "CAISO", "SPP"])
+    load_mw = st.number_input("Firm Load (MW)", value=100.0)
+    target_rel = st.slider("Target Reliability (%)", 90.0, 100.0, 100.0) / 100.0
     
-    st.header("2. Firming & Storage")
-    rte = st.slider("Storage Round Trip Efficiency (%)", 30, 95, 40) / 100.0
+    st.header("2. Technology Selection")
+    config_mode = st.radio("Resource Mix", ["Solar + Wind", "Solar Only", "Wind Only"])
+    rte = st.slider("Storage RTE (%)", 30, 95, 60) / 100.0
     
-    fuel_type = st.selectbox("Firming Fuel Type", ["No Fuel (Battery Only)", "Biomethanol (Advanced LDES/RSOFC)", "Custom Green Fuel"])
-    
-    if fuel_type == "Biomethanol (Advanced LDES/RSOFC)":
-        use_fuel = True
-        fuel_cost_tonne = st.number_input("Biomethanol Cost ($/tonne)", value=600.0, step=50.0)
-        fuel_mwh_per_tonne = 5.53
-    elif fuel_type == "Custom Green Fuel":
-        use_fuel = True
-        fuel_cost_tonne = st.number_input("Fuel Cost ($/tonne)", value=500.0)
-        fuel_mwh_per_tonne = st.number_input("Fuel Energy Density (MWh/tonne)", value=15.0)
+    st.header("3. Financial Engineering")
+    use_leverage = st.toggle("Apply Project Finance (Leverage)", value=True)
+    if use_leverage:
+        debt_pct = st.slider("Debt Fraction (%)", 50, 90, 75) / 100.0
+        interest_rate = st.slider("Interest Rate (%)", 3.0, 10.0, 6.5) / 100.0
+        equity_irr = st.slider("Target Equity IRR (%)", 8.0, 25.0, 12.0) / 100.0
+        # Calculate WACC
+        wacc = (debt_pct * interest_rate * (1 - 0.21)) + ((1 - debt_pct) * equity_irr)
+        st.caption(f"Blended WACC: {wacc*100:.2f}%")
     else:
-        use_fuel = False
-        fuel_cost_tonne = 0
-        fuel_mwh_per_tonne = 1
+        wacc = st.slider("Unlevered IRR (%)", 5.0, 20.0, 10.0) / 100.0
         
-    st.header("3. CAPEX ($/kW or $/kWh)")
-    solar_capex_kw = st.number_input("Solar CAPEX ($/kW)", value=1000)
-    wind_capex_kw = st.number_input("Wind CAPEX ($/kW)", value=1400)
-    
-    st.markdown("**Storage Cost Structure**")
-    st_capex_kw = st.number_input("Power Block CAPEX ($/kW)", value=2000)
-    st_capex_kwh = st.number_input("Energy Block CAPEX ($/kWh)", value=20)
-    
-    st.header("4. OPEX & Financials")
-    solar_opex_kw = st.number_input("Solar O&M ($/kW-yr)", value=15)
-    wind_opex_kw = st.number_input("Wind O&M ($/kW-yr)", value=40)
-    st_opex_kw = st.number_input("Storage O&M ($/kW-yr)", value=10)
-    
-    target_irr = st.slider("Unlevered IRR (%)", 5.0, 20.0, 10.0) / 100.0
-    itc_percent = st.slider("ITC Tax Credit (%)", 0.0, 60.0, 40.0) / 100.0
-    
+    itc_percent = st.slider("ITC Tax Credit (%)", 30, 70, 40) / 100.0
+
+    st.header("4. CAPEX Settings")
+    solar_capex = st.number_input("Solar $/kW", value=900)
+    wind_capex = st.number_input("Wind $/kW", value=1400)
+    st_pwr_capex = st.number_input("Storage Power $/kW", value=2000)
+    st_en_capex = st.number_input("Storage Energy $/kWh", value=10)
+
     st.divider()
     run_opt = st.button("🚀 Run Optimization", type="primary", use_container_width=True)
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (Same as before but with config_mode logic) ---
 @st.cache_data(show_spinner=False)
-def get_weather_profiles(api_key, lat, lon):
+def get_weather(api_key, lat, lon):
     url = "https://developer.nrel.gov/api/pvwatts/v8.json"
-    params = {'api_key': api_key, 'lat': lat, 'lon': lon, 'system_capacity': 1000, 
-              'azimuth': 180, 'tilt': lat, 'array_type': 1, 'module_type': 0, 'losses': 14, 'timeframe': 'hourly'}
-    res = requests.get(url, params=params)
-    if res.status_code == 200:
-        solar_1mw = np.array(res.json()['outputs']['ac']) / 1_000_000
-    else:
-        return None, None
-        
-    hours = np.arange(8760)
-    diurnal = np.cos((hours % 24 - 2) * np.pi / 12) * -0.15
-    seasonal = np.cos((hours - 4380) * np.pi / 4380) * 0.20
-    wind_1mw = np.clip(0.35 + diurnal + seasonal + np.random.normal(0, 0.1, 8760), 0, 1.0)
-    
-    return solar_1mw, wind_1mw
+    params = {'api_key': api_key, 'lat': lat, 'lon': lon, 'system_capacity': 1000, 'azimuth': 180, 'tilt': lat, 'array_type': 1, 'module_type': 0, 'losses': 14, 'timeframe': 'hourly'}
+    res = requests.get(url, params=params).json()
+    solar = np.array(res['outputs']['ac']) / 1e6
+    # Synthetic wind (Night-peaking for Texas/Midwest)
+    h = np.arange(8760)
+    wind = np.clip(0.4 + 0.15*np.cos((h%24-2)*np.pi/12) + np.random.normal(0,0.1,8760), 0, 1)
+    return solar, wind
 
-def simulate_dispatch(s_mw, w_mw, st_mw, st_mwh, solar_1mw, wind_1mw, load_mw, rte, use_fuel):
-    solar_gen = s_mw * solar_1mw
-    wind_gen = w_mw * wind_1mw
-    total_gen = solar_gen + wind_gen
-    load = np.full(8760, load_mw)
-    
-    # Nested function to run the 8760 array so we can do it twice (Wrap-Around Method)
-    def run_year(start_soc):
-        soc = np.zeros(8760)
-        fuel_used_mwh = np.zeros(8760)
-        unmet_load = np.zeros(8760)
-        current_soc = start_soc
-        
-        for i in range(8760):
-            net_load = load[i] - total_gen[i]
-            if net_load < 0: 
-                charge = min(-net_load, st_mw, (st_mwh - current_soc) / rte)
-                current_soc += charge * rte
-            elif net_load > 0: 
-                discharge = min(net_load, st_mw, current_soc)
-                current_soc -= discharge
-                shortfall = net_load - discharge
-                if shortfall > 0:
-                    if use_fuel:
-                        fuel_used_mwh[i] = shortfall
-                    else:
-                        unmet_load[i] = shortfall
-            soc[i] = current_soc
-        return soc, fuel_used_mwh, unmet_load, current_soc
+def dispatch(s_mw, w_mw, st_mw, st_mwh, sol_1, win_1, load_mw, rte):
+    gen = (s_mw * sol_1) + (w_mw * win_1)
+    soc, unmet = np.zeros(8760), np.zeros(8760)
+    cur = st_mwh * 0.5
+    for i in range(8760):
+        net = load_mw - gen[i]
+        if net < 0:
+            chg = min(-net, st_mw, (st_mwh - cur)/rte)
+            cur += chg * rte
+        else:
+            dis = min(net, st_mw, cur)
+            cur -= dis
+            unmet[i] = net - dis
+        soc[i] = cur
+    rel = 1 - (np.sum(unmet) / (load_mw * 8760))
+    return rel, soc, unmet
 
-    # Pass 1: Burn-in to find the natural December 31st equilibrium SOC
-    _, _, _, natural_end_soc = run_year(st_mwh * 0.5)
-    
-    # Pass 2: The actual recorded simulation using the natural starting point
-    soc, fuel_used_mwh, unmet_load, _ = run_year(natural_end_soc)
-    
-    energy_delivered = (load_mw * 8760) - np.sum(unmet_load)
-    reliability = energy_delivered / (load_mw * 8760)
-    
-    return reliability, np.sum(fuel_used_mwh), soc, total_gen, unmet_load, fuel_used_mwh
-
-# --- MAIN PAGE OUTPUTS ---
-st.title("📊 24/7 Clean Firm Power Outputs")
-
+# --- MAIN ENGINE ---
 if run_opt:
-    if not api_key:
-        st.error("Please enter an NREL API Key in the sidebar.")
-        st.stop()
+    with st.spinner("Optimizing with WACC and Leverage..."):
+        s1, w1 = get_weather(api_key, 31.12, -97.41)
         
-    with st.spinner("Running Wrap-Around pass to find optimal CAPEX/OPEX balance..."):
-        solar_1mw, wind_1mw = get_weather_profiles(api_key, lat, lon)
-        if solar_1mw is None:
-            st.error("Invalid API Key or Location.")
-            st.stop()
-            
-        s_grid = np.linspace(load_mw, load_mw * 12, 8) 
-        w_grid = np.linspace(load_mw, load_mw * 12, 8)
-        st_pwr_grid = [load_mw] 
-        st_cap_grid = np.linspace(0, load_mw * 350, 15) 
+        # Adjust grid based on mode
+        s_grid = [0] if config_mode == "Wind Only" else np.linspace(load_mw, load_mw*8, 8)
+        w_grid = [0] if config_mode == "Solar Only" else np.linspace(load_mw, load_mw*8, 8)
+        st_grid = np.linspace(load_mw*50, load_mw*450, 10)
         
-        best_ppa_net = float('inf')
-        best_system = None
-        total_load_annual = load_mw * 8760
-        
+        best = {'ppa': float('inf')}
         for s in s_grid:
             for w in w_grid:
-                for st_p in st_pwr_grid:
-                    for st_c in st_cap_grid:
-                        rel, fuel_mwh, _, _, _, _ = simulate_dispatch(s, w, st_p, st_c, solar_1mw, wind_1mw, load_mw, rte, use_fuel)
-                        
-                        if rel >= target_reliability:
-                            capex_gross = (s * 1000 * solar_capex_kw) + (w * 1000 * wind_capex_kw) + \
-                                          (st_p * 1000 * st_capex_kw) + (st_c * 1000 * st_capex_kwh)
-                            capex_net = capex_gross * (1 - itc_percent)
-                            
-                            annual_opex = (s * 1000 * solar_opex_kw) + (w * 1000 * wind_opex_kw) + (st_p * 1000 * st_opex_kw)
-                            annual_fuel_cost = (fuel_mwh / fuel_mwh_per_tonne) * fuel_cost_tonne if use_fuel else 0
-                            
-                            rev_req_gross = -npf.pmt(target_irr, 20, capex_gross) + annual_opex + annual_fuel_cost
-                            ppa_gross = rev_req_gross / (total_load_annual * rel)
-                            
-                            rev_req_net = -npf.pmt(target_irr, 20, capex_net) + annual_opex + annual_fuel_cost
-                            ppa_net = rev_req_net / (total_load_annual * rel)
-                            
-                            if ppa_net < best_ppa_net:
-                                best_ppa_net = ppa_net
-                                best_system = {
-                                    's_mw': s, 'w_mw': w, 'st_mw': st_p, 'st_mwh': st_c,
-                                    'rel': rel, 'fuel_mwh': fuel_mwh, 'capex_gross': capex_gross, 
-                                    'capex_net': capex_net, 'ppa_gross': ppa_gross, 'ppa_net': ppa_net,
-                                    'annual_fuel_cost': annual_fuel_cost
-                                }
+                for c in st_grid:
+                    rel, soc, unm = dispatch(s, w, load_mw, c, s1, w1, load_mw, rte)
+                    if rel >= target_rel:
+                        capex = (s*1000*solar_capex) + (w*1000*wind_capex) + (load_mw*1000*st_pwr_capex) + (c*1000*st_en_capex)
+                        net_capex = capex * (1 - itc_percent)
+                        opex = (s*15 + w*40 + load_mw*10) * 1000
+                        # PPA Calculation using WACC
+                        rev = -npf.pmt(wacc, 20, net_capex) + opex
+                        ppa = rev / (load_mw * 8760)
+                        if ppa < best['ppa']:
+                            best = {'ppa': ppa, 's':s, 'w':w, 'c':c, 'rel':rel, 'soc':soc, 'capex':net_capex}
 
-        if best_system is None:
-            st.error("Could not reach target reliability even with massive overbuilds. You must allow fuel or lower the target.")
-            st.stop()
-            
-        rel, fuel_mwh, soc, total_gen, unmet, fuel_arr = simulate_dispatch(
-            best_system['s_mw'], best_system['w_mw'], best_system['st_mw'], 
-            best_system['st_mwh'], solar_1mw, wind_1mw, load_mw, rte, use_fuel
-        )
-        
-        # --- SCENARIO SUMMARY TABLE (EXCEL EXPORT) ---
-        st.success("Optimization Complete! Copy the table below to your scenario tracker.")
-        
-        duration_hrs = best_system['st_mwh'] / best_system['st_mw'] if best_system['st_mw'] > 0 else 0
-        fuel_tonnes = best_system['fuel_mwh'] / fuel_mwh_per_tonne if use_fuel else 0
-        
-        summary_data = {
-            "ISO": iso,
-            "State": state,
-            "Firm Load (MW)": load_mw,
-            "Fuel Used?": "Yes" if use_fuel else "No",
-            "Storage RTE": f"{rte*100:.0f}%",
-            "Target Rel.": f"{target_reliability*100:.1f}%",
-            "Achieved Rel.": f"{best_system['rel']*100:.2f}%",
-            "PPA w/ ITC ($/MWh)": round(best_system['ppa_net'], 2),
-            "PPA Gross ($/MWh)": round(best_system['ppa_gross'], 2),
-            "Net CAPEX ($M)": round(best_system['capex_net'] / 1e6, 1),
-            "Solar (MW)": round(best_system['s_mw'], 1),
-            "Wind (MW)": round(best_system['w_mw'], 1),
-            "Storage (MW)": round(best_system['st_mw'], 1),
-            "Storage (MWh)": round(best_system['st_mwh'], 1),
-            "Duration (hrs)": round(duration_hrs, 1),
-            "Fuel (tonnes/yr)": round(fuel_tonnes, 0)
-        }
-        
-        df_summary = pd.DataFrame([summary_data])
-        st.dataframe(df_summary, hide_index=True)
-        
-        st.divider()
-
-        # --- FINANCIAL METRICS ---
-        st.subheader("Financial Performance")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("PPA (No ITC)", f"${best_system['ppa_gross']:.2f} / MWh")
-        c2.metric(f"PPA (With {itc_percent*100:.0f}% ITC)", f"${best_system['ppa_net']:.2f} / MWh")
-        c3.metric("Gross CAPEX", f"${best_system['capex_gross']/1e6:.1f}M")
-        c4.metric("Net CAPEX (Post-ITC)", f"${best_system['capex_net']/1e6:.1f}M")
-        
-        st.divider()
-        
-        # --- PHYSICAL ARCHITECTURE ---
-        st.subheader("Optimized Physical Architecture")
-        phys1, phys2, phys3, phys4 = st.columns(4)
-        phys1.metric("Solar Required", f"{best_system['s_mw']:.1f} MW", f"~{best_system['s_mw']*6:.0f} acres", delta_color="off")
-        phys2.metric("Wind Required", f"{best_system['w_mw']:.1f} MW", f"~{best_system['w_mw']*60:.0f} acres", delta_color="off")
-        phys3.metric("Storage Required", f"{best_system['st_mw']:.1f} MW", f"{duration_hrs:.0f} hours ({best_system['st_mwh']:.0f} MWh)", delta_color="off")
-        phys4.metric("Fuel Needed", f"{fuel_tonnes:,.0f} tonnes/yr" if use_fuel else "N/A", f"${best_system['annual_fuel_cost']/1e6:.2f}M / yr OPEX" if use_fuel else "", delta_color="off")
-        
-        st.divider()
-
-        # --- DATE TRACKING & DROUGHTS ---
-        date_rng = pd.date_range(start='2025-01-01', periods=8760, freq='h')
-        
-        df_dispatch = pd.DataFrame({
-            'Date': date_rng,
-            'SOC_MWh': soc,
-            'Fuel_MWh': fuel_arr,
-            'Unmet_MWh': unmet
-        })
-        
-        if use_fuel and fuel_tonnes > 0:
-            st.subheader("⚠️ Top 5 Energy Droughts (Fuel Usage)")
-            df_daily_fuel = df_dispatch.groupby(df_dispatch['Date'].dt.date)['Fuel_MWh'].sum().reset_index()
-            top_droughts = df_daily_fuel[df_daily_fuel['Fuel_MWh'] > 0].sort_values(by='Fuel_MWh', ascending=False).head(5)
-            
-            top_droughts.columns = ['Date', 'Fuel Burned (MWh)']
-            top_droughts['Est. Tonnes Used'] = top_droughts['Fuel Burned (MWh)'] / fuel_mwh_per_tonne
-            st.dataframe(top_droughts.style.format({'Fuel Burned (MWh)': '{:.1f}', 'Est. Tonnes Used': '{:.1f}'}), use_container_width=True)
-            
-        elif not use_fuel and np.sum(unmet) > 0:
-            st.subheader("⚠️ Top 5 Grid Failures (Unmet Load)")
-            df_daily_fail = df_dispatch.groupby(df_dispatch['Date'].dt.date)['Unmet_MWh'].sum().reset_index()
-            top_fails = df_daily_fail[df_daily_fail['Unmet_MWh'] > 0].sort_values(by='Unmet_MWh', ascending=False).head(5)
-            top_fails.columns = ['Date', 'Unmet Load (MWh)']
-            st.dataframe(top_fails.style.format({'Unmet Load (MWh)': '{:.1f}'}), use_container_width=True)
-
-        # --- ANNUAL GRAPHS ---
-        st.subheader("Annual Operational Profile (8760 Hours)")
-        
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-        
-        soc_percent = (soc / best_system['st_mwh'] * 100) if best_system['st_mwh'] > 0 else np.zeros(8760)
-        ax1.plot(date_rng, soc_percent, color='blue', linewidth=0.5)
-        ax1.fill_between(date_rng, 0, soc_percent, color='blue', alpha=0.2)
-        ax1.set_ylabel("Storage SOC (%)")
-        ax1.set_title("Storage Inventory Throughout the Year")
-        ax1.grid(True, alpha=0.3)
-        
-        if use_fuel:
-            ax2.bar(date_rng, fuel_arr, color='red', width=0.05)
-            ax2.set_ylabel("Fuel Burned (MWh/hr)")
-            ax2.set_title("Firming Fuel Dispatch Events")
+        if best['ppa'] == float('inf'):
+            st.error("No solution found. Try lower reliability or more resources.")
         else:
-            ax2.bar(date_rng, unmet, color='black', width=0.05)
-            ax2.set_ylabel("Blackout (MWh/hr)")
-            ax2.set_title("Unmet Load Events (No Fuel)")
+            st.success(f"Optimal PPA Found: ${best['ppa']:.2f}/MWh")
+            # Summary Table
+            df = pd.DataFrame([{
+                "ISO": iso, "PPA": f"${best['ppa']:.2f}", "Solar": f"{best['s']:.0f}MW", 
+                "Wind": f"{best['w']:.0f}MW", "LDES": f"{best['c']/load_mw:.0f} hrs", "Rel": f"{best['rel']*100:.1f}%"
+            }])
+            st.table(df)
             
-        ax2.grid(True, alpha=0.3)
-        ax2.xaxis.set_major_locator(mdates.MonthLocator())
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        plt.xticks(rotation=45)
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-
-else:
-    st.info("👈 Enter your parameters in the sidebar and click **Run Optimization**.")
+            # Annual Chart
+            fig, ax = plt.subplots(figsize=(10,3))
+            ax.plot(best['soc']/best['c']*100, color='blue', alpha=0.8)
+            ax.set_title("Annual Battery Inventory (SOC %)")
+            st.pyplot(fig)
